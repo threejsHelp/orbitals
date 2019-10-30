@@ -1,0 +1,184 @@
+var OrbitController = (function () {
+    function OrbitController(config) {
+        var _this = this;
+        this._o = new THREE.Vector3(0, 0, 0);
+        this._x = new THREE.Vector3(1, 0, 0);
+        this._y = new THREE.Vector3(0, 1, 0);
+        this._z = new THREE.Vector3(0, 0, 1);
+        this._firstMove = true;
+        this._needsUpdate = false;
+        // ======================================================================================================
+		// Mousewheel, zoom, minimum distance
+        this.onMouseWheel = function (delta) {
+            var scale = delta < 0 ? _this._zoomScale.mouseWheel.zoom_in : _this._zoomScale.mouseWheel.zoom_out;
+            _this.scaleZoom(scale);
+        };
+        this._camera = config.camera;
+        this._element = config.element;
+        this._mousewheelDetector = new utils.MouseWheelDetector({
+            element: this._element
+        });
+        var viewConfig = Main.getInstance().config.config.view;
+        this._easing = {
+            distance: viewConfig.easing.distance,
+            rotation: viewConfig.easing.rotation
+        };
+        this._distance = {
+            initial: config.distance.initial,
+            current: 0,
+            target: 0,
+            min: 14,
+            max: config.distance.max
+        };
+        this._zoomScale = {
+            press: {
+                zoom_in: 1 / config.zoom.press,
+                zoom_out: config.zoom.press
+            },
+            mouseWheel: {
+                zoom_in: config.zoom.mouseWheel,
+                zoom_out: 1 / config.zoom.mouseWheel
+            }
+        };
+        this._switchTransition = config.switchTransition;
+        this.cameraPositionSignal = new utils.SimpleSignal();
+        this.change = new utils.SimpleSignal();
+        this.updateAngles();
+    }
+    // ======================================================================================================
+    // Enable, disable
+    OrbitController.prototype.enable = function () {
+        this._mousewheelDetector.wheelSignal.add(this.onMouseWheel);
+        this.switchToDefault(false);
+    };
+    OrbitController.prototype.disable = function () {
+        this._mousewheelDetector.wheelSignal.remove(this.onMouseWheel);
+    };
+    // ======================================================================================================
+    // Public rotation methods called by BuildingController
+    OrbitController.prototype.startRotation = function (pointer) {
+        this._phi_down = this._phi;
+        this._theta_down = this._theta;
+        this._firstMove = true;
+    };
+    OrbitController.prototype.updateRotation = function (pointer) {
+        var PIHalf = Math.PI / 2;
+        this._phi = this._phi_down - pointer.offsetX * 0.01;
+        // commented out because now we use easing
+        //this._phi = this._phi % (Math.PI * 2);
+        this._theta = this._theta_down + pointer.offsetY * 0.01;
+        this._theta = this._theta < -PIHalf ? -PIHalf : this._theta > PIHalf ? PIHalf : this._theta;
+        // clamp to be above ground
+        this._theta = Math.max(0.02, this._theta);
+        this._needsUpdate = true;
+        if (this._firstMove) {
+            this._firstMove = false;
+            this.change.dispatch();
+        }
+    };
+    OrbitController.prototype.endRotation = function (pointer) {
+        // TODO check
+    };
+    // ======================================================================================================
+    // Update
+    // called in requestAnimationFrame
+    OrbitController.prototype.update = function (dt) {
+        if (!this._needsUpdate) {
+            return false;
+        }
+        if (this._phi_current === undefined) {
+            this._phi_current = this._phi;
+        }
+        if (this._theta_current === undefined) {
+            this._theta_current = this._theta;
+        }
+        var eps = 0.0001;
+        var d_phi = this._phi - this._phi_current;
+        var d_theta = this._theta - this._theta_current;
+        var d_dist = this._distance.target - this._distance.current;
+        if (Math.abs(d_phi) < eps && Math.abs(d_theta) < eps && Math.abs(d_dist) < eps) {
+            this._needsUpdate = false;
+        }
+        this._phi_current += d_phi * this._easing.rotation;
+        this._theta_current += d_theta * this._easing.rotation;
+        this._distance.current += d_dist * this._easing.distance;
+        var phi = this._phi_current;
+        var theta = this._theta_current;
+        var m = new THREE.Matrix4().makeRotationAxis(this._y, phi);
+        this._right = this._x.clone();
+        this._right.applyMatrix4(m);
+        var cameraPos = this._z.clone().multiplyScalar(this._distance.current).applyMatrix4(m);
+        m.makeRotationAxis(this._right, -theta);
+        cameraPos.applyMatrix4(m);
+        this._camera.position = cameraPos;
+        this._camera.lookAt(this._o);
+        // up
+        var view = new THREE.Vector3().subVectors(this._o, this._camera.position);
+        this._camera.up.crossVectors(this._right, view);
+        return true;
+    };
+    OrbitController.prototype.pressZoom = function (zoomIn) {
+        var scale = zoomIn ? this._zoomScale.press.zoom_in : this._zoomScale.press.zoom_out;
+        this.scaleZoom(scale);
+    };
+    OrbitController.prototype.scaleZoom = function (scale) {
+        this.setDistance(this.getDistance() * scale);
+    };
+    OrbitController.prototype.getDistance = function () {
+        return this._distance.target;
+    };
+    OrbitController.prototype.setDistance = function (value) {
+        this._distance.target = value;
+        this._distance.target = MathUtils.clamp(this._distance.target, this._distance.min, this._distance.max);
+        this._needsUpdate = true;
+        this.change.dispatch();
+    };
+    // ======================================================================================================
+    // Switch camera
+    OrbitController.prototype.switchToDefault = function (transition) {
+        if (transition === void 0) { transition = undefined; }
+        this._camera.up = new THREE.Vector3(0, 1, 0);
+        this.setCameraPosition(40, 30, this._distance.initial);
+        this._camera.lookAt(new THREE.Vector3(0, 0, 0));
+        if (transition === undefined) {
+            transition = this._switchTransition;
+        }
+        this.updateAngles(transition);
+    };
+    OrbitController.prototype.setCameraPosition = function (x, y, z) {
+        var pos = this._camera.position;
+        pos.set(x, y, z);
+        this.cameraPositionSignal.dispatch(pos);
+    };
+    OrbitController.prototype.switchTo = function (eye, up) {
+        var target = new THREE.Vector3(0, 0, 0);
+        //var view = new THREE.Vector3().subVectors(target, eye).normalize();
+        //var right = new THREE.Vector3().crossVectors(view, up);
+        this._camera.up = up;
+        this._camera.position = eye;
+        this._camera.lookAt(target);
+        this.updateAngles(this._switchTransition);
+    };
+    // updates angles from camera position
+    // called when a new camera is set
+    OrbitController.prototype.updateAngles = function (transition) {
+        if (transition === void 0) { transition = false; }
+        var cameraPos = this._camera.position;
+        var x = cameraPos.x;
+        var y = cameraPos.y;
+        var z = cameraPos.z;
+        this._theta = Math.atan(y / Math.sqrt(x * x + z * z));
+        this._phi = Math.atan2(x, z);
+        var dist = Math.sqrt(x * x + y * y + z * z);
+        this._distance.target = dist;
+        if (!transition) {
+            this._distance.current = dist;
+            this._theta_current = this._theta;
+            this._phi_current = this._phi;
+        }
+        else {
+            this._needsUpdate = true;
+        }
+    };
+    return OrbitController;
+})();
